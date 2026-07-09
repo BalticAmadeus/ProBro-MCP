@@ -1,0 +1,11 @@
+{
+	"servers": {
+		"probro": {
+			"command": "node",
+			"args": [
+				"src/index.js"
+			],
+			"cwd": "${workspaceFolder}"
+		}
+	}
+}
