@@ -8,6 +8,8 @@
   "scripts": {
     "start": "node src/index.js",
     "start:http": "node src/http-wrapper.js",
+    "copilot:bootstrap": "node scripts/build-copilot-instructions.mjs",
+    "copilot:profiles": "node scripts/build-copilot-instructions.mjs --list-profiles",
     "test:smoke": "node scripts/smoke-test.cjs",
     "test:integration": "node scripts/integration-test.cjs",
     "test:http": "node scripts/http-wrapper-test.cjs",

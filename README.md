@@ -4,6 +4,15 @@ Standalone MCP server for ProBro/OpenEdge database access.
 
 It exposes ProBro-style database operations as MCP tools so other extensions, agents, or clients can use them.
 
+## Docs map
+
+- README.md: primary setup and day-to-day usage.
+- HTTP-WRAPPER.md: HTTP endpoint reference.
+- COPILOT-CHAT-INTEGRATION.md: advanced Copilot Chat + HTTP wrapper examples and troubleshooting.
+- .github/copilot-bootstrap/global-rules.md: reusable AI agent rules for any DB.
+- .github/copilot-bootstrap/profiles/<profile>.md: DB-specific AI guidance.
+- .github/copilot-instructions.md: generated active instruction file consumed by Copilot in this workspace (do not edit directly).
+
 ## Features
 
 - Reuses the ProBro OpenEdge command protocol (base64 JSON over TCP)
@@ -223,11 +232,13 @@ npm run test:integration
 You can expose the ProBro database to GitHub Copilot Chat via the HTTP wrapper:
 
 1. Start the HTTP wrapper: `npm run start:http`
-2. Create or edit `.github/copilot-instructions.md` in your workspace
-3. Add instructions that reference the HTTP API endpoints
-4. Start asking Copilot Chat questions about your database
+2. Build agent bootstrap instructions: `npm run copilot:bootstrap`
+3. Optional: choose a DB profile (PowerShell: `$env:COPILOT_DB_PROFILE="sports2020"; npm run copilot:bootstrap`, bash: `COPILOT_DB_PROFILE=sports2020 npm run copilot:bootstrap`)
+4. Keep global rules in `.github/copilot-bootstrap/global-rules.md`
+5. Keep DB-specific rules in `.github/copilot-bootstrap/profiles/<profile>.md`
+6. Start asking Copilot Chat questions about your database
 
-See [COPILOT-CHAT-INTEGRATION.md](COPILOT-CHAT-INTEGRATION.md) for complete setup instructions and examples.
+See [COPILOT-CHAT-INTEGRATION.md](COPILOT-CHAT-INTEGRATION.md) for advanced HTTP wrapper examples and troubleshooting.
 
 ## Current limitations
 
