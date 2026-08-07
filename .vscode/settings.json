@@ -1,4 +1,13 @@
 {
   "chat.mcp.autostart": "newAndOutdated",
-  "probro.mcp.autoConnect": true
+  "pro-bro.mcp.mode": "local",
+  "pro-bro.mcp.dlc": "C:/Progress/OpenEdge",
+  "pro-bro.mcp.agentPort": 23456,
+  "abl.configuration.runtimes": [
+    {
+      "name": "12.8",
+      "path": "C:\\Progress\\OpenEdge"
+    }
+  ],
+  "abl.configuration.defaultRuntime": "12.8"
 }

@@ -146,6 +146,7 @@ server.listen(PORT, () => {
   console.log('');
   console.log('Available endpoints:');
   console.log(`  POST http://localhost:${PORT}/api/probro_set_connection`);
+  console.log(`  POST http://localhost:${PORT}/api/probro_set_active_connection`);
   console.log(`  POST http://localhost:${PORT}/api/probro_get_version`);
   console.log(`  POST http://localhost:${PORT}/api/probro_get_saved_connections`);
   console.log(`  POST http://localhost:${PORT}/api/probro_refresh_auto_connection`);

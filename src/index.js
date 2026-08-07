@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -36,6 +36,10 @@ function isTruthy(value) {
 function getByPath(source, keyPath) {
   if (!source || typeof source !== 'object') {
     return undefined;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(source, keyPath)) {
+    return source[keyPath];
   }
 
   return keyPath.split('.').reduce((acc, key) => {
@@ -81,25 +85,34 @@ function firstBool(source, paths, fallback = false) {
 }
 
 function readWorkspaceSettings(projectRoot) {
-  const settingsPath = path.join(projectRoot, '.vscode', 'settings.json');
-  try {
-    if (!fs.existsSync(settingsPath)) {
-      return null;
-    }
-
-    const raw = fs.readFileSync(settingsPath, 'utf8');
-    // VS Code settings are often JSONC (comments/trailing commas), so parse leniently.
-    const parsed = JSON.parse(
-      raw
-        .replace(/^\uFEFF/, '')
-        .replace(/\/\*[\s\S]*?\*\//g, '')
-        .replace(/(^|[^:])\/\/.*$/gm, '$1')
-        .replace(/,\s*([}\]])/g, '$1')
-    );
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch (_error) {
-    return null;
+  const candidates = [];
+  if (projectRoot) {
+    candidates.push(path.join(projectRoot, '.vscode', 'settings.json'));
   }
+  candidates.push(path.resolve(defaultProjectRoot, '.vscode', 'settings.json'));
+  candidates.push(path.resolve(process.cwd(), '.vscode', 'settings.json'));
+
+  for (const settingsPath of candidates) {
+    try {
+      if (!fs.existsSync(settingsPath)) {
+        continue;
+      }
+
+      const raw = fs.readFileSync(settingsPath, 'utf8');
+      const parsed = JSON.parse(
+        raw
+          .replace(/^\uFEFF/, '')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/(^|[^:])\/\/.*$/gm, '$1')
+          .replace(/,\s*([}\]])/g, '$1')
+      );
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_error) {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 function getVsCodeStateDatabasePaths() {
@@ -112,21 +125,28 @@ function getVsCodeStateDatabasePaths() {
   ];
 }
 
-function loadProBroDbConfigsFromVsCodeState() {
-  const [workspaceStorageRoot, globalStateDbPath] = getVsCodeStateDatabasePaths();
+function listWorkspaceStateDbPaths(workspaceStorageRoot) {
   const stateDbPaths = [];
+  if (!fs.existsSync(workspaceStorageRoot)) {
+    return stateDbPaths;
+  }
 
-  if (fs.existsSync(workspaceStorageRoot)) {
-    for (const entry of fs.readdirSync(workspaceStorageRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const dbPath = path.join(workspaceStorageRoot, entry.name, 'state.vscdb');
-      if (fs.existsSync(dbPath)) {
-        stateDbPaths.push(dbPath);
-      }
+  for (const entry of fs.readdirSync(workspaceStorageRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const dbPath = path.join(workspaceStorageRoot, entry.name, 'state.vscdb');
+    if (fs.existsSync(dbPath)) {
+      stateDbPaths.push(dbPath);
     }
   }
+
+  return stateDbPaths;
+}
+
+function loadProBroDbConfigsFromVsCodeState() {
+  const [workspaceStorageRoot, globalStateDbPath] = getVsCodeStateDatabasePaths();
+  const stateDbPaths = listWorkspaceStateDbPaths(workspaceStorageRoot);
 
   if (fs.existsSync(globalStateDbPath)) {
     stateDbPaths.push(globalStateDbPath);
@@ -170,6 +190,55 @@ function loadProBroDbConfigsFromVsCodeState() {
     return Array.isArray(parsed) ? parsed : [];
   } catch (_error) {
     return [];
+  }
+}
+
+function loadProBroActiveConnectionFromVsCodeState() {
+  const [workspaceStorageRoot] = getVsCodeStateDatabasePaths();
+  const stateDbPaths = listWorkspaceStateDbPaths(workspaceStorageRoot);
+
+  if (stateDbPaths.length === 0) {
+    return null;
+  }
+
+  const script = [
+    'import json, sqlite3, sys',
+    'result = None',
+    'for db in sys.argv[1:]:',
+    '    try:',
+    '        conn = sqlite3.connect(db)',
+    "        rows = conn.execute(\"select key, cast(value as text) from ItemTable where key in ('pro-bro.activeConnection','BalticAmadeus.pro-bro')\").fetchall()",
+    '        for key, value in rows:',
+    '            if not value:',
+    '                continue',
+    '            try:',
+    '                parsed = json.loads(value)',
+    '            except Exception:',
+    '                continue',
+    "            if key == 'pro-bro.activeConnection' and isinstance(parsed, dict):",
+    '                result = parsed',
+    '                break',
+    "            if key == 'BalticAmadeus.pro-bro' and isinstance(parsed, dict):",
+    "                nested = parsed.get('pro-bro.activeConnection')",
+    '                if isinstance(nested, dict):',
+    '                    result = nested',
+    '                    break',
+    '    except Exception:',
+    '        continue',
+    '    if result:',
+    '        break',
+    'print(json.dumps(result))',
+  ].join('\n');
+
+  try {
+    const raw = execFileSync('python', ['-c', script, ...stateDbPaths], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_error) {
+    return null;
   }
 }
 
@@ -330,6 +399,64 @@ function getAutoConnectionInputFromProBroState() {
     return null;
   }
 
+  const modeHint = String(connection.connectionId || '').trim().toUpperCase();
+  const settings = readWorkspaceSettings(defaultProjectRoot) || {};
+  const dlcFromSettings = firstString(settings, [
+    'pro-bro.mcp.dlc',
+    'probro.mcp.dlc',
+    'probro.connection.dlc',
+    'probro.dlc',
+    'probro.activeConnection.dlc',
+  ]);
+
+  const agentHostFromSettings = firstString(
+    settings,
+    ['pro-bro.mcp.agentHost', 'probro.mcp.agentHost', 'probro.connection.agentHost', 'probro.agentHost', 'probro.activeConnection.agentHost']
+  );
+  const agentPortFromSettings = firstInt(
+    settings,
+    ['pro-bro.mcp.agentPort', 'probro.mcp.agentPort', 'probro.connection.agentPort', 'probro.agentPort'],
+    0
+  );
+
+  if (modeHint === 'LOCAL' && dlcFromSettings) {
+    return {
+      mode: 'local',
+      database,
+      user: String(connection.user || '').trim(),
+      password: String(connection.password || '').trim(),
+      dbHost: String(connection.host || '').trim(),
+      dbPort: String(connection.port || '').trim(),
+      params: String(connection.params || '').trim(),
+      projectRoot: defaultProjectRoot,
+      startupTimeoutMs: 15000,
+      socketTimeoutMs: 15000,
+      dlc: dlcFromSettings,
+      agentPort: firstInt(settings, ['pro-bro.mcp.agentPort', 'probro.mcp.agentPort', 'probro.connection.agentPort', 'probro.agentPort'], 23456),
+      tempFilesPath: firstString(settings, ['pro-bro.mcp.tempFilesPath', 'probro.mcp.tempFilesPath', 'probro.tempFilesPath']),
+      logEntryTypes: firstString(settings, ['pro-bro.mcp.logEntryTypes', 'probro.mcp.logEntryTypes', 'probro.logEntryTypes']),
+    };
+  }
+
+  if (modeHint === 'LOCAL') {
+    return {
+      mode: 'local',
+      database,
+      user: String(connection.user || '').trim(),
+      password: String(connection.password || '').trim(),
+      dbHost: String(connection.host || '').trim(),
+      dbPort: String(connection.port || '').trim(),
+      params: String(connection.params || '').trim(),
+      projectRoot: defaultProjectRoot,
+      startupTimeoutMs: 15000,
+      socketTimeoutMs: 15000,
+      dlc: '',
+      agentPort: firstInt(settings, ['pro-bro.mcp.agentPort', 'probro.mcp.agentPort', 'probro.connection.agentPort', 'probro.agentPort'], 23456),
+      tempFilesPath: firstString(settings, ['pro-bro.mcp.tempFilesPath', 'probro.mcp.tempFilesPath', 'probro.tempFilesPath']),
+      logEntryTypes: firstString(settings, ['pro-bro.mcp.logEntryTypes', 'probro.mcp.logEntryTypes', 'probro.logEntryTypes']),
+    };
+  }
+
   return {
     mode: 'remote',
     database,
@@ -341,8 +468,84 @@ function getAutoConnectionInputFromProBroState() {
     projectRoot: defaultProjectRoot,
     startupTimeoutMs: 15000,
     socketTimeoutMs: 15000,
-    agentHost: '127.0.0.1',
-    agentPort: 23456,
+    agentHost: agentHostFromSettings,
+    agentPort: agentPortFromSettings,
+  };
+}
+
+function getAutoConnectionInputFromProBroActiveState() {
+  const connection = loadProBroActiveConnectionFromVsCodeState();
+  if (!connection) {
+    return null;
+  }
+
+  const database = String(connection.name || '').trim();
+  if (!database) {
+    return null;
+  }
+
+  const modeHint = String(connection.connectionId || '').trim().toUpperCase();
+  const settings = readWorkspaceSettings(defaultProjectRoot) || {};
+  const modeFromSettings = firstString(settings, ['pro-bro.mcp.mode', 'probro.mcp.mode', 'probro.mode'], '').toLowerCase();
+  const dlcFromSettings = firstString(settings, [
+    'pro-bro.mcp.dlc',
+    'probro.mcp.dlc',
+    'probro.connection.dlc',
+    'probro.dlc',
+    'probro.activeConnection.dlc',
+  ]);
+  const dlcFromState = firstString(connection, ['dlc', 'runtime.dlc', 'local.dlc', 'connection.dlc']);
+
+  const agentHostFromSettings = firstString(
+    settings,
+    ['pro-bro.mcp.agentHost', 'probro.mcp.agentHost', 'probro.connection.agentHost', 'probro.agentHost', 'probro.activeConnection.agentHost']
+  );
+  const agentHostFromState = firstString(connection, ['agentHost', 'runtime.agentHost', 'remote.agentHost']);
+  const agentPortFromSettings = firstInt(
+    settings,
+    ['pro-bro.mcp.agentPort', 'probro.mcp.agentPort', 'probro.connection.agentPort', 'probro.agentPort'],
+    0
+  );
+  const agentPortFromState = firstInt(connection, ['agentPort', 'runtime.agentPort', 'remote.agentPort'], 0);
+  const tempFilesPathFromState = firstString(connection, ['tempFilesPath', 'runtime.tempFilesPath', 'local.tempFilesPath']);
+  const logEntryTypesFromState = firstString(connection, ['logEntryTypes', 'runtime.logEntryTypes', 'local.logEntryTypes']);
+  const startupTimeoutMsFromState = firstInt(connection, ['startupTimeoutMs', 'runtime.startupTimeoutMs'], 15000);
+  const socketTimeoutMsFromState = firstInt(connection, ['socketTimeoutMs', 'runtime.socketTimeoutMs'], 15000);
+
+  const preferLocal = modeFromSettings === 'local';
+
+  if (preferLocal) {
+    return {
+      mode: 'local',
+      database,
+      user: String(connection.user || '').trim(),
+      password: String(connection.password || '').trim(),
+      dbHost: String(connection.host || '').trim(),
+      dbPort: String(connection.port || '').trim(),
+      params: String(connection.params || '').trim(),
+      projectRoot: defaultProjectRoot,
+      startupTimeoutMs: startupTimeoutMsFromState,
+      socketTimeoutMs: socketTimeoutMsFromState,
+      dlc: dlcFromState || dlcFromSettings || '',
+      agentPort: agentPortFromState || firstInt(settings, ['pro-bro.mcp.agentPort', 'probro.mcp.agentPort', 'probro.connection.agentPort', 'probro.agentPort'], 23456),
+      tempFilesPath: tempFilesPathFromState || firstString(settings, ['pro-bro.mcp.tempFilesPath', 'probro.mcp.tempFilesPath', 'probro.tempFilesPath']),
+      logEntryTypes: logEntryTypesFromState || firstString(settings, ['pro-bro.mcp.logEntryTypes', 'probro.mcp.logEntryTypes', 'probro.logEntryTypes']),
+    };
+  }
+
+  return {
+    mode: 'remote',
+    database,
+    user: String(connection.user || '').trim(),
+    password: String(connection.password || '').trim(),
+    dbHost: String(connection.host || '').trim(),
+    dbPort: String(connection.port || '').trim(),
+    params: String(connection.params || '').trim(),
+    projectRoot: defaultProjectRoot,
+    startupTimeoutMs: startupTimeoutMsFromState,
+    socketTimeoutMs: socketTimeoutMsFromState,
+    agentHost: agentHostFromSettings || agentHostFromState || '127.0.0.1',
+    agentPort: agentPortFromSettings || agentPortFromState || 23456,
   };
 }
 
@@ -354,6 +557,14 @@ function formatAutoConnectionFailure(error, autoConnection) {
   }
 
   const { input, source } = autoConnection;
+
+  if (input.mode === 'local' && message.includes('dlc is required in local mode')) {
+    return `Configured local ProBro connection from ${source} is missing DLC. Set pro-bro.mcp.dlc (or probro.mcp.dlc) in workspace settings, or call probro_set_connection with dlc explicitly. Raw error: ${message}`;
+  }
+
+  if (input.mode === 'remote' && message.includes('agentHost and agentPort are required in remote mode')) {
+    return `Configured remote ProBro connection from ${source} is missing agent endpoint. Set pro-bro.mcp.agentHost and pro-bro.mcp.agentPort, or call probro_set_connection explicitly. Raw error: ${message}`;
+  }
 
   if (input.mode === 'remote' && message.includes('ECONNREFUSED')) {
     return `Configured remote ProBro agent at ${input.agentHost || '127.0.0.1'}:${input.agentPort || 23456} was unavailable. No automatic fallback was attempted. Active source: ${source}. Raw error: ${message}`;
@@ -370,32 +581,44 @@ function formatAutoConnectionFailure(error, autoConnection) {
   return message;
 }
 
-function getAutoConnectionInput() {
-  const proBroStateInput = getAutoConnectionInputFromProBroState();
-  if (proBroStateInput) {
-    return {
-      source: 'proBroState',
-      input: proBroStateInput,
-    };
+export function getAutoConnectionCandidates() {
+  const candidates = [];
+  const seen = new Set();
+
+  const pushCandidate = (source, input) => {
+    if (!input || typeof input !== 'object') {
+      return;
+    }
+    const key = [source, input.mode || '', input.database || '', input.agentHost || '', input.agentPort || ''].join('|');
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    candidates.push({ source, input });
+  };
+
+  const proBroActiveInput = getAutoConnectionInputFromProBroActiveState();
+  pushCandidate('proBroActiveState', proBroActiveInput);
+
+  // Extension-selected active connection is authoritative when present.
+  if (candidates.length > 0 && candidates[0].source === 'proBroActiveState') {
+    return candidates;
   }
 
-  const settingsInput = getAutoConnectionInputFromWorkspaceSettings();
-  if (settingsInput) {
-    return {
-      source: 'workspaceSettings',
-      input: settingsInput,
-    };
-  }
+  const proBroStateInput = getAutoConnectionInputFromProBroState();
+  pushCandidate('proBroState', proBroStateInput);
+
+  const workspaceInput = getAutoConnectionInputFromWorkspaceSettings();
+  pushCandidate('workspaceSettings', workspaceInput);
 
   const envInput = getAutoConnectionInputFromEnv();
-  if (envInput) {
-    return {
-      source: 'env',
-      input: envInput,
-    };
-  }
+  pushCandidate('env', envInput);
 
-  return null;
+  return candidates;
+}
+
+export function getAutoConnectionInput() {
+  return getAutoConnectionCandidates()[0] || null;
 }
 
 function asTextContent(payload) {
@@ -481,6 +704,14 @@ async function resetBridge(newConnection) {
   await bridge.init();
 }
 
+async function setActiveConnection(connection, source = 'manual') {
+  const normalized = normalizeConnectionInput(connection);
+  await resetBridge(normalized);
+  activeConnection = normalized;
+  activeConnectionSource = source;
+  return normalized;
+}
+
 async function ensureActiveConnection() {
   if (activeConnection && bridge) {
     return;
@@ -488,21 +719,28 @@ async function ensureActiveConnection() {
 
   if (!autoConnectPromise) {
     autoConnectPromise = (async () => {
-      const autoConnection = getAutoConnectionInput();
-      if (!autoConnection) {
+      const autoConnections = getAutoConnectionCandidates();
+      if (autoConnections.length === 0) {
         throw new Error(
           'No active ProBro connection. Define ProBro state or workspace settings, or call probro_set_connection manually. PROBRO_* env vars are optional overrides.'
         );
       }
 
-      const normalized = normalizeConnectionInput(autoConnection.input);
-      try {
-        await resetBridge(normalized);
-      } catch (error) {
-        throw new Error(formatAutoConnectionFailure(error, autoConnection));
+      const failures = [];
+
+      for (const autoConnection of autoConnections) {
+        try {
+          const normalized = normalizeConnectionInput(autoConnection.input);
+          await resetBridge(normalized);
+          activeConnection = normalized;
+          activeConnectionSource = autoConnection.source;
+          return;
+        } catch (error) {
+          failures.push(formatAutoConnectionFailure(error, autoConnection));
+        }
       }
-      activeConnection = normalized;
-      activeConnectionSource = autoConnection.source;
+
+      throw new Error(failures.join(' | '));
     })();
   }
 
@@ -516,7 +754,8 @@ async function ensureActiveConnection() {
 }
 
 function getConnectionStatus() {
-  const autoConnection = getAutoConnectionInput();
+  const autoCandidates = getAutoConnectionCandidates();
+  const autoConnection = autoCandidates[0] || null;
   return {
     connected: Boolean(activeConnection && bridge),
     autoConnectEnabled: Boolean(autoConnection),
@@ -535,11 +774,18 @@ function getConnectionStatus() {
     envDefaults: autoConnection
       ? {
           mode: autoConnection.input.mode,
-          agentHost: autoConnection.input.agentHost || '127.0.0.1',
-          agentPort: autoConnection.input.agentPort || 23456,
+          agentHost: autoConnection.input.agentHost || '',
+          agentPort: autoConnection.input.agentPort || 0,
           database: autoConnection.input.database,
         }
       : null,
+    autoConnectCandidates: autoCandidates.map((candidate) => ({
+      source: candidate.source,
+      mode: candidate.input.mode,
+      database: candidate.input.database,
+      agentHost: candidate.input.agentHost || '',
+      agentPort: candidate.input.agentPort || 0,
+    })),
   };
 }
 
@@ -654,16 +900,48 @@ server.tool(
     logEntryTypes: z.string().optional(),
   },
   async (input) => {
-    const normalized = normalizeConnectionInput(input);
-    await resetBridge(normalized);
-    activeConnection = normalized;
-    activeConnectionSource = 'manual';
+    const normalized = await setActiveConnection(input, 'manual');
 
     const version = await exec('get_version');
     return asTextContent({
       ok: true,
       runtime: normalized.runtime,
       version,
+    });
+  }
+);
+
+server.tool(
+  'probro_set_active_connection',
+  withBehavioralDefaults('Set the active ProBro connection from an already-prepared extension or host context.'),
+  {
+    mode: z.enum(['local', 'remote']).default('local'),
+    projectRoot: z.string().optional(),
+    dlc: z.string().optional(),
+    agentHost: z.string().optional(),
+    agentPort: z.number().int().positive().optional(),
+    database: z.string(),
+    user: z.string().optional(),
+    password: z.string().optional(),
+    dbHost: z.string().optional(),
+    dbPort: z.string().optional(),
+    params: z.string().optional(),
+    startupTimeoutMs: z.number().int().positive().optional(),
+    socketTimeoutMs: z.number().int().positive().optional(),
+    tempFilesPath: z.string().optional(),
+    logEntryTypes: z.string().optional(),
+  },
+  async (input) => {
+    const normalized = await setActiveConnection(input, 'extension');
+    return asTextContent({
+      ok: true,
+      runtime: normalized.runtime,
+      connection: {
+        mode: normalized.runtime.mode,
+        database: normalized.dbConnection.database,
+        agentHost: normalized.runtime.agentHost,
+        agentPort: normalized.runtime.agentPort,
+      },
     });
   }
 );
@@ -850,10 +1128,14 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-main().catch(async (error) => {
-  if (bridge) {
-    await bridge.close();
-  }
-  console.error(error);
-  process.exit(1);
-});
+const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMainModule) {
+  main().catch(async (error) => {
+    if (bridge) {
+      await bridge.close();
+    }
+    console.error(error);
+    process.exit(1);
+  });
+}
